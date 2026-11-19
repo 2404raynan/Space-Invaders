@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Space Invaders</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Courier New", monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      background: radial-gradient(circle at top, #18264d 0, #080c19 55%, #02030a 100%);
+      color: #fff;
+    }
+
+    .game-shell {
+      width: min(92vw, 720px);
+      text-align: center;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      color: #72ffcf;
+      font-size: clamp(1.35rem, 5vw, 2.25rem);
+      font-family: "Courier New", monospace;
+      font-weight: bold;
+      letter-spacing: 0.12em;
+      text-shadow: 0 0 16px rgba(114, 255, 207, 0.7);
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      max-height: 78vh;
+      aspect-ratio: 4 / 3;
+      border: 2px solid #72ffcf;
+      border-radius: 8px;
+      background: #050712;
+      box-shadow: 0 0 28px rgba(114, 255, 207, 0.18);
+      touch-action: none;
+    }
+
+    .controls {
+      display: none;
+      justify-content: center;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .controls button {
+      width: 68px;
+      height: 54px;
+      border: 1px solid #72ffcf;
+      border-radius: 8px;
+      background: #10182c;
+      color: #72ffcf;
+      font-size: 1.25rem;
+      font-family: "Courier New", monospace;
+      font-weight: bold;
+      touch-action: none;
+    }
+
+    @media (hover: none), (pointer: coarse) {
+      .controls {
+        display: flex;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="game-shell">
+    <h1>SPACE INVADERS</h1>
+    <canvas id="game" width="800" height="600" aria-label="Space Invaders game"></canvas>
+    <div class="controls" aria-label="Touch controls">
+      <button type="button" data-action="left" aria-label="Move left">&#9664;</button>
+      <button type="button" data-action="fire" aria-label="Fire">&#9673;</button>
+      <button type="button" data-action="right" aria-label="Move right">&#9654;</button>
+    </div>
+  </main>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    const keys = { left: false, right: false, fire: false };
+    const player = { x: 370, y: 548, width: 60, height: 28, speed: 6, cooldown: 0 };
+    let bullets = [];
+    let enemyBullets = [];
+    let enemies = [];
+    let bunkers = [];
+    let particles = [];
+    let score = 0;
+    let highScore = loadHighScore();
+    let lives = 3;
+    let level = 1;
+    let enemyDirection = 1;
+    let enemySpeed = 0.7;
+    let enemyAnimationFrame = 0;
+    let enemyAnimationTimer = 0;
+    let gameState = "playing";
+    let audioContext = null;
+    let audioUnavailable = false;
+
+    function loadHighScore() {
+      try {
+        const savedScore = Number(localStorage.getItem("spaceInvadersHighScore"));
+        return Number.isSafeInteger(savedScore) && savedScore >= 0 ? savedScore : 0;
+      } catch (error) {
+        console.warn("Unable to load the high score:", error);
+        return 0;
+      }
+    }
+
+    function saveHighScore() {
+      try {
+        localStorage.setItem("spaceInvadersHighScore", String(highScore));
+      } catch (error) {
+        console.warn("Unable to save the high score:", error);
+      }
+    }
+
+    function unlockAudio() {
+      if (audioUnavailable) return;
+
+      if (!audioContext) {
+        const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextConstructor) {
+          audioUnavailable = true;
+          return;
+        }
+
+        try {
+          audioContext = new AudioContextConstructor();
+        } catch (error) {
+          audioUnavailable = true;
+          console.warn("Unable to initialize game audio:", error);
+          return;
+        }
+      }
+
+      if (audioContext.state === "suspended") {
+        audioContext.resume().catch(error => {
+          console.warn("Unable to resume game audio:", error);
+        });
+      }
+    }
+
+    function playTone(startFrequency, endFrequency, duration, waveform, volume, delay = 0) {
+      if (!audioContext) return;
+
+      const startTime = audioContext.currentTime + delay;
+      const stopTime = startTime + duration;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+
+      oscillator.type = waveform;
+      oscillator.frequency.setValueAtTime(startFrequency, startTime);
+      oscillator.frequency.exponentialRampToValueAtTime(endFrequency, stopTime);
+      gain.gain.setValueAtTime(0.0001, startTime);
+      gain.gain.linearRampToValueAtTime(volume, startTime + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, stopTime);
+
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start(startTime);
+      oscillator.stop(stopTime);
+    }
+
+    function playShootSound() {
+      playTone(780, 330, 0.09, "square", 0.045);
+    }
+
+    function playExplosionSound() {
+      playTone(170, 45, 0.28, "sawtooth", 0.07);
+    }
+
+    function playGameOverSound() {
+      playTone(392, 196, 0.28, "square", 0.055);
+      playTone(220, 55, 0.6, "sawtooth", 0.07, 0.28);
+    }
+
+    function endGame() {
+      if (gameState === "gameover") return;
+      gameState = "gameover";
+      playGameOverSound();
+    }
+
+    const bunkerMask = [
+      "..########..",
+      ".##########.",
+      "############",
+      "############",
+      "############",
+      "###......###",
+      "##........##",
+      "##........##"
+    ];
+
+    const pixelGlyphs = {
+      A: "01110100011000111111100011000110001",
+      B: "11110100011000111110100011000111110",
+      C: "01111100001000010000100001000001111",
+      D: "11110100011000110001100011000111110",
+      E: "11111100001000011110100001000011111",
+      F: "11111100001000011110100001000010000",
+      G: "01111100001000010111100011000101111",
+      H: "10001100011000111111100011000110001",
+      I: "11111001000010000100001000010011111",
+      J: "00111000100001000010000101001001100",
+      K: "10001100101010011000101001001010001",
+      L: "10000100001000010000100001000011111",
+      M: "10001110111010110101100011000110001",
+      N: "10001110011010110011100011000110001",
+      O: "01110100011000110001100011000101110",
+      P: "11110100011000111110100001000010000",
+      Q: "01110100011000110001101011001001101",
+      R: "11110100011000111110101001001010001",
+      S: "01111100001000001110000010000111110",
+      T: "11111001000010000100001000010000100",
+      U: "10001100011000110001100011000101110",
+      V: "10001100011000110001100010101000100",
+      W: "10001100011000110101101011101110001",
+      X: "10001100010101000100010101000110001",
+      Y: "10001100010101000100001000010000100",
+      Z: "11111000010001000100010001000011111",
+      0: "01110100011001110101110011000101110",
+      1: "00100011000010000100001000010001110",
+      2: "01110100010000100010001000100011111",
+      3: "11110000010000101110000010000111110",
+      4: "00010001100101010010111110001000010",
+      5: "11111100001000011110000010000111110",
+      6: "01110100001000011110100011000101110",
+      7: "11111000010001000100010000100001000",
+      8: "01110100011000101110100011000101110",
+      9: "01110100011000101111000010000101110",
+      ":": "00000001000010000000001000010000000"
+    };
+
+    function drawPixelText(text, x, y, scale, align = "left") {
+      const characters = String(text).toUpperCase();
+      const characterWidth = 5;
+      const advance = 6 * scale;
+      const textWidth = characters.length * advance - scale;
+      const startX = align === "center" ? x - textWidth / 2 :
+        align === "right" ? x - textWidth : x;
+
+      for (let characterIndex = 0; characterIndex < characters.length; characterIndex++) {
+        const glyph = pixelGlyphs[characters[characterIndex]];
+        if (!glyph) continue;
+
+        for (let row = 0; row < 7; row++) {
+          for (let column = 0; column < characterWidth; column++) {
+            if (glyph[row * characterWidth + column] === "1") {
+              ctx.fillRect(
+                startX + characterIndex * advance + column * scale,
+                y + row * scale,
+                scale,
+                scale
+              );
+            }
+          }
+        }
+      }
+    }
+
+    function createBunkers() {
+      const cellSize = 4;
+      const width = bunkerMask[0].length * cellSize;
+      const height = bunkerMask.length * cellSize;
+
+      bunkers = Array.from({ length: 4 }, (_, index) => ({
+        x: canvas.width * (index + 1) / 5 - width / 2,
+        y: 440,
+        width,
+        height,
+        cellSize,
+        cells: bunkerMask.map(row => [...row].map(cell => cell === "#"))
+      }));
+    }
+
+    function createEnemies() {
+      enemies = [];
+      enemySpeed = 0.7;
+      enemyDirection = 1;
+      enemyAnimationFrame = 0;
+      enemyAnimationTimer = 0;
+      createBunkers();
+
+      for (let row = 0; row < 5; row++) {
+        for (let column = 0; column < 10; column++) {
+          enemies.push({
+            x: 120 + column * 58,
+            y: 85 + row * 48,
+            width: 38,
+            height: 28,
+            row
+          });
+        }
+      }
+    }
+
+    function resetPlayer() {
+      player.x = (canvas.width - player.width) / 2;
+      player.cooldown = 0;
+    }
+
+    function resetGame() {
+      score = 0;
+      lives = 3;
+      level = 1;
+      bullets = [];
+      enemyBullets = [];
+      particles = [];
+      resetPlayer();
+      createEnemies();
+      gameState = "playing";
+    }
+
+    function shoot() {
+      if (player.cooldown <= 0 && gameState === "playing") {
+        playShootSound();
+        bullets.push({
+          x: player.x + player.width / 2 - 3,
+          y: player.y - 12,
+          width: 6,
+          height: 16
+        });
+        player.cooldown = 16;
+      }
+    }
+
+    function enemyShoot() {
+      if (gameState !== "playing" || enemies.length === 0) return;
+
+      const shooters = [];
+      for (let column = 0; column < 10; column++) {
+        let bottomEnemy = null;
+        for (const enemy of enemies) {
+          if (Math.floor((enemy.x - 120) / 58) === column) {
+            if (!bottomEnemy || enemy.y > bottomEnemy.y) bottomEnemy = enemy;
+          }
+        }
+        if (bottomEnemy) shooters.push(bottomEnemy);
+      }
+
+      if (shooters.length && Math.random() < 0.018) {
+        const shooter = shooters[Math.floor(Math.random() * shooters.length)];
+        enemyBullets.push({
+          x: shooter.x + shooter.width / 2 - 3,
+          y: shooter.y + shooter.height,
+          width: 6,
+          height: 14
+        });
+      }
+    }
+
+    function overlaps(a, b) {
+      return a.x < b.x + b.width &&
+        a.x + a.width > b.x &&
+        a.y < b.y + b.height &&
+        a.y + a.height > b.y;
+    }
+
+    function damageBunker(bullet) {
+      for (const bunker of bunkers) {
+        let hitCell = null;
+        for (let row = 0; row < bunker.cells.length && !hitCell; row++) {
+          for (let column = 0; column < bunker.cells[row].length; column++) {
+            if (!bunker.cells[row][column]) continue;
+
+            const cell = {
+              x: bunker.x + column * bunker.cellSize,
+              y: bunker.y + row * bunker.cellSize,
+              width: bunker.cellSize,
+              height: bunker.cellSize
+            };
+            if (overlaps(bullet, cell)) {
+              hitCell = { row, column };
+              break;
+            }
+          }
+        }
+
+        if (!hitCell) continue;
+
+        for (const [rowOffset, columnOffset] of [
+          [0, 0], [0, 1], [1, 0], [1, 1], [0, -1]
+        ]) {
+          const row = hitCell.row + rowOffset;
+          const column = hitCell.column + columnOffset;
+          if (bunker.cells[row]?.[column] !== undefined) {
+            bunker.cells[row][column] = false;
+          }
+        }
+        return true;
+      }
+
+      return false;
+    }
+
+    function burst(x, y, color) {
+      playExplosionSound();
+      for (let i = 0; i < 12; i++) {
+        particles.push({
+          x,
+          y,
+          vx: (Math.random() - 0.5) * 5,
+          vy: (Math.random() - 0.5) * 5,
+          life: 30,
+          color
+        });
+      }
+    }
+
+    function update() {
+      if (gameState !== "playing") return;
+
+      if (keys.left) player.x -= player.speed;
+      if (keys.right) player.x += player.speed;
+      if (keys.fire) shoot();
+
+      player.x = Math.max(12, Math.min(canvas.width - player.width - 12, player.x));
+      if (player.cooldown > 0) player.cooldown--;
+
+      bullets.forEach(bullet => bullet.y -= 9);
+      enemyBullets.forEach(bullet => bullet.y += 5.5);
+      bullets = bullets.filter(bullet => bullet.y + bullet.height > 0);
+      enemyBullets = enemyBullets.filter(bullet => bullet.y < canvas.height);
+
+      for (const enemy of enemies) {
+        enemy.x += enemyDirection * enemySpeed;
+      }
+
+      const leftEdgeReached = enemies.some(enemy => enemy.x <= 20);
+      const rightEdgeReached = enemies.some(enemy =>
+        enemy.x + enemy.width >= canvas.width - 20
+      );
+
+      if (leftEdgeReached || rightEdgeReached) {
+        for (const enemy of enemies) {
+          enemy.x -= enemyDirection * enemySpeed;
+          enemy.y += 18;
+        }
+        enemyDirection *= -1;
+      }
+
+      enemyAnimationTimer++;
+      if (enemyAnimationTimer >= 34) {
+        enemyAnimationFrame = 1 - enemyAnimationFrame;
+        enemyAnimationTimer = 0;
+      }
+
+      for (let bulletIndex = bullets.length - 1; bulletIndex >= 0; bulletIndex--) {
+        if (damageBunker(bullets[bulletIndex])) {
+          bullets.splice(bulletIndex, 1);
+          continue;
+        }
+
+        for (let enemyIndex = enemies.length - 1; enemyIndex >= 0; enemyIndex--) {
+          if (overlaps(bullets[bulletIndex], enemies[enemyIndex])) {
+            const enemy = enemies[enemyIndex];
+            burst(enemy.x + enemy.width / 2, enemy.y + enemy.height / 2, "#72ffcf");
+            enemies.splice(enemyIndex, 1);
+            bullets.splice(bulletIndex, 1);
+            score += 10 + (4 - enemy.row) * 5;
+            if (score > highScore) {
+              highScore = score;
+              saveHighScore();
+            }
+            break;
+          }
+        }
+      }
+
+      for (let index = enemyBullets.length - 1; index >= 0; index--) {
+        if (damageBunker(enemyBullets[index])) {
+          enemyBullets.splice(index, 1);
+          continue;
+        }
+
+        if (overlaps(enemyBullets[index], player)) {
+          enemyBullets.splice(index, 1);
+          lives--;
+          burst(player.x + player.width / 2, player.y + player.height / 2, "#ff6b81");
+          resetPlayer();
+          if (lives <= 0) endGame();
+        }
+      }
+
+      for (const enemy of enemies) {
+        if (enemy.y + enemy.height >= player.y - 8) {
+          lives = 0;
+          endGame();
+          break;
+        }
+      }
+
+      enemyShoot();
+
+      if (enemies.length === 0) {
+        level++;
+        enemyBullets = [];
+        createEnemies();
+      }
+
+      for (const particle of particles) {
+        particle.x += particle.vx;
+        particle.y += particle.vy;
+        particle.life--;
+      }
+      particles = particles.filter(particle => particle.life > 0);
+    }
+
+    function drawShip(x, y) {
+      ctx.fillStyle = "#72ffcf";
+      ctx.beginPath();
+      ctx.moveTo(x + 30, y);
+      ctx.lineTo(x + 48, y + 20);
+      ctx.lineTo(x + 60, y + 28);
+      ctx.lineTo(x, y + 28);
+      ctx.lineTo(x + 12, y + 20);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#cffff0";
+      ctx.fillRect(x + 27, y - 5, 6, 10);
+    }
+
+    function drawBunkers() {
+      ctx.fillStyle = "#72ff91";
+      for (const bunker of bunkers) {
+        for (let row = 0; row < bunker.cells.length; row++) {
+          for (let column = 0; column < bunker.cells[row].length; column++) {
+            if (bunker.cells[row][column]) {
+              ctx.fillRect(
+                bunker.x + column * bunker.cellSize,
+                bunker.y + row * bunker.cellSize,
+                bunker.cellSize,
+                bunker.cellSize
+              );
+            }
+          }
+        }
+      }
+    }
+
+    const invaderSprites = [
+      [
+        [
+          "....####....",
+          "...######...",
+          "..###..###..",
+          "..########..",
+          ".###.##.###.",
+          "....####....",
+          "...#....#...",
+          "..#.#..#.#.."
+        ],
+        [
+          "....####....",
+          "...######...",
+          "..###..###..",
+          "..########..",
+          ".###.##.###.",
+          "....####....",
+          "..#.#..#.##.",
+          ".#....##...."
+        ]
+      ],
+      [
+        [
+          "..##....##..",
+          "...######...",
+          "..##.##.##..",
+          ".##########.",
+          "###.####.###",
+          "..##.##.##..",
+          ".##......##.",
+          "##.#....#.##"
+        ],
+        [
+          "..##....##..",
+          "...######...",
+          "..##.##.##..",
+          ".##########.",
+          "###.####.###",
+          "..##.##.##..",
+          ".##......##.",
+          ".###....###."
+        ]
+      ],
+      [
+        [
+          "..########..",
+          "############",
+          "#.###..###.#",
+          "############",
+          ".##.####.##.",
+          "..##.##.##..",
+          ".#..#..#..#.",
+          "#....##....#"
+        ],
+        [
+          "..########..",
+          "############",
+          "#.###..###.#",
+          "############",
+          ".##.####.##.",
+          "..##.##.##..",
+          ".#..#..#..#.",
+          ".##......##."
+        ]
+      ]
+    ];
+
+    function drawEnemy(enemy) {
+      const spriteType = enemy.row === 0 ? 0 : enemy.row < 3 ? 1 : 2;
+      ctx.fillStyle = enemy.row === 0 ? "#ff72bd" :
+        enemy.row < 3 ? "#72a7ff" : "#72ff91";
+      const sprite = invaderSprites[spriteType][enemyAnimationFrame];
+      const scale = 3;
+
+      for (let row = 0; row < sprite.length; row++) {
+        for (let column = 0; column < sprite[row].length; column++) {
+          if (sprite[row][column] === "#") {
+            ctx.fillRect(enemy.x + column * scale, enemy.y + row * scale, scale, scale);
+          }
+        }
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = "rgba(114, 255, 207, 0.12)";
+      for (let y = 35; y < canvas.height; y += 45) {
+        ctx.fillRect(0, y, canvas.width, 1);
+      }
+
+      ctx.fillStyle = "#fff";
+      drawPixelText(`LIVES ${lives}`, 24, 18, 2);
+      drawPixelText(`WAVE ${level}`, canvas.width / 2, 18, 2, "center");
+      drawPixelText(`SCORE ${score}`, canvas.width - 24, 14, 2, "right");
+      drawPixelText(`HIGH SCORE ${highScore}`, canvas.width - 24, 38, 2, "right");
+
+      enemies.forEach(drawEnemy);
+      drawBunkers();
+      drawShip(player.x, player.y);
+
+      ctx.fillStyle = "#72ffcf";
+      bullets.forEach(bullet => ctx.fillRect(bullet.x, bullet.y, bullet.width, bullet.height));
+
+      ctx.fillStyle = "#ff6b81";
+      enemyBullets.forEach(bullet => ctx.fillRect(bullet.x, bullet.y, bullet.width, bullet.height));
+
+      particles.forEach(particle => {
+        ctx.globalAlpha = particle.life / 30;
+        ctx.fillStyle = particle.color;
+        ctx.fillRect(particle.x, particle.y, 4, 4);
+      });
+      ctx.globalAlpha = 1;
+
+      if (gameState === "gameover") {
+        ctx.fillStyle = "rgba(2, 3, 10, 0.82)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#ff6b81";
+        drawPixelText("GAME OVER", canvas.width / 2, 238, 6, "center");
+        ctx.fillStyle = "#fff";
+        drawPixelText(`FINAL SCORE: ${score}`, canvas.width / 2, 316, 2, "center");
+        drawPixelText("PRESS ENTER OR TAP TO RESTART", canvas.width / 2, 358, 2, "center");
+      }
+    }
+
+    function gameLoop() {
+      update();
+      draw();
+      requestAnimationFrame(gameLoop);
+    }
+
+    window.addEventListener("pointerdown", unlockAudio, { capture: true });
+    window.addEventListener("keydown", unlockAudio, { capture: true });
+
+    window.addEventListener("keydown", event => {
+      if (["ArrowLeft", "a", "A"].includes(event.key)) keys.left = true;
+      if (["ArrowRight", "d", "D"].includes(event.key)) keys.right = true;
+      if (["ArrowUp", "w", "W", " "].includes(event.key)) {
+        keys.fire = true;
+        event.preventDefault();
+      }
+      if (event.key === "Enter" && gameState === "gameover") resetGame();
+    });
+
+    window.addEventListener("keyup", event => {
+      if (["ArrowLeft", "a", "A"].includes(event.key)) keys.left = false;
+      if (["ArrowRight", "d", "D"].includes(event.key)) keys.right = false;
+      if (["ArrowUp", "w", "W", " "].includes(event.key)) keys.fire = false;
+    });
+
+    canvas.addEventListener("pointerdown", event => {
+      if (gameState === "gameover") {
+        resetGame();
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      const x = (event.clientX - rect.left) * (canvas.width / rect.width);
+      if (x < canvas.width / 2) keys.left = true;
+      else shoot();
+    });
+
+    canvas.addEventListener("pointerup", () => {
+      keys.left = false;
+      keys.right = false;
+    });
+
+    document.querySelectorAll(".controls button").forEach(button => {
+      const action = button.dataset.action;
+      const press = event => {
+        event.preventDefault();
+        if (gameState === "gameover") resetGame();
+        if (action === "left") keys.left = true;
+        if (action === "right") keys.right = true;
+        if (action === "fire") keys.fire = true;
+      };
+      const release = () => {
+        if (action === "left") keys.left = false;
+        if (action === "right") keys.right = false;
+        if (action === "fire") keys.fire = false;
+      };
+      button.addEventListener("pointerdown", press);
+      button.addEventListener("pointerup", release);
+      button.addEventListener("pointerleave", release);
+    });
+
+    resetGame();
+    gameLoop();
+  </script>
+</body>
+</html>
